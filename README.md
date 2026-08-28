@@ -4,7 +4,7 @@
 
 ## Текущая архитектура MVP
 
-**Telegram → Vercel Functions → Gemini 3.5 Transcribe → GitHub**
+**Telegram → Vercel Functions → Gemini 3.5 Transcribe → GitHub Issue**
 
 - **GitHub** — код, версия опросника и текстовые ответы.
 - **Vercel** — выполнение webhook Telegram. Локальный компьютер не нужен.
@@ -23,9 +23,11 @@ Supabase в первом MVP не используется.
 
 ## Где лежат ответы
 
-`data/answers.json`
+Ответы сохраняются **не коммитами**, а комментариями в GitHub Issue №1: `Bot data — Vika strategy answers`.
 
-Для каждого Telegram-пользователя сохраняются:
+Это сделано специально: ответ Вики не должен считаться изменением кода и запускать новый Vercel deployment. Я смогу читать эти комментарии через подключение к GitHub прямо из ChatGPT.
+
+Для каждого ответа сохраняются:
 
 - ID вопроса;
 - снимок формулировки вопроса на момент ответа;
@@ -35,9 +37,9 @@ Supabase в первом MVP не используется.
 - дата;
 - Telegram message ID.
 
-Аудиофайл постоянно не хранится: Vercel временно скачивает voice из Telegram, передаёт его Gemini и удаляет временный файл после транскрибации.
+Аудиофайл постоянно не хранится: Vercel временно скачивает voice из Telegram в `/tmp`, передаёт его Gemini и удаляет временный локальный файл после транскрибации. Это временное пространство облачной функции, а не компьютер пользователя.
 
-> Важно: репозиторий сейчас публичный. Пока в `data/answers.json` нет реальных ответов это нормально. Перед реальным использованием следует либо сделать репозиторий private, либо сознательно принять, что ответы будут публичны.
+> Важно: репозиторий сейчас публичный. Значит и реальные ответы в Issue №1 будут публичными. Перед реальным опросом можно перевести репозиторий в private, если понадобится конфиденциальность.
 
 ## Команды бота
 
@@ -68,11 +70,12 @@ SETUP_SECRET
 ```text
 GEMINI_TRANSCRIBE_MODEL=gemini-3.5-transcribe
 GITHUB_REPO=shashkovsystemservice-coder/vika-strategy-bot
-GITHUB_BRANCH=main
-GITHUB_ANSWERS_PATH=data/answers.json
+GITHUB_ANSWERS_ISSUE_NUMBER=1
 MAX_VOICE_SECONDS=600
 ALLOWED_TELEGRAM_USER_ID=<Telegram ID Вики>
 ```
+
+`GITHUB_WRITE_TOKEN` нужен только серверу Vercel, чтобы добавлять комментарии в Issue №1. В GitHub-коде этого токена нет.
 
 ## Webhook
 
@@ -84,17 +87,19 @@ ALLOWED_TELEGRAM_USER_ID=<Telegram ID Вики>
 
 Endpoint сам определит production URL Vercel и зарегистрирует `/api/telegram` в Telegram Bot API.
 
+Webhook отвечает Telegram сразу, а длительную транскрибацию Vercel продолжает через `waitUntil`, поэтому Telegram не должен повторно присылать update только из-за долгой обработки аудио.
+
 ## Этапы запуска
 
 1. Подключить GitHub-репозиторий к Vercel.
 2. Создать Telegram-бота в BotFather.
 3. Добавить Telegram token в Vercel Environment Variables.
 4. Создать Gemini API key и добавить его в Vercel.
-5. Создать GitHub credential с правом записи только в этот репозиторий и добавить его в Vercel.
+5. Создать GitHub credential с правом записи в этот репозиторий и добавить его в Vercel.
 6. Добавить webhook secret и setup secret.
 7. Один раз вызвать `/api/setup-webhook`.
 8. В Telegram выполнить `/whoami`, затем записать ID Вики в `ALLOWED_TELEGRAM_USER_ID`.
-9. Проверить полный цикл: вопрос → voice → Gemini → текст → GitHub → следующий вопрос.
+9. Проверить полный цикл: вопрос → voice → Gemini → текст → GitHub Issue → следующий вопрос.
 
 ## Принцип работы с ChatGPT
 
