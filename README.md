@@ -95,7 +95,7 @@ Webhook отвечает Telegram сразу, а длительную транс
 2. Создать Telegram-бота в BotFather. ✅
 3. Добавить Telegram token в Vercel Environment Variables. ✅
 4. Создать Gemini API key и добавить его в Vercel. ✅
-5. Создать GitHub credential с правом записи в этот репозиторий и добавить его в Vercel.
+5. Создать GitHub credential с правом записи в этот репозиторий и добавить его в Vercel. ✅
 6. Добавить webhook secret и setup secret.
 7. Один раз вызвать `/api/setup-webhook`.
 8. В Telegram выполнить `/whoami`, затем записать ID Вики в `ALLOWED_TELEGRAM_USER_ID`.
