@@ -1,6 +1,6 @@
 {
   "name": "vika-strategy-bot",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "type": "module",
   "scripts": {
@@ -9,6 +9,9 @@
   },
   "engines": {
     "node": ">=20"
+  },
+  "dependencies": {
+    "@google/genai": "^2.19.0"
   },
   "devDependencies": {
     "vercel": "^46.0.0"
