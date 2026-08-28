@@ -1,3 +1,4 @@
+import { waitUntil } from '@vercel/functions';
 import { loadQuestionnaire, getCurrentQuestion, getProgress, formatQuestion } from '../lib/questions.js';
 import { readAnswerStore, saveResponse } from '../lib/github-store.js';
 import { getTelegramFile, sendMessage } from '../lib/telegram.js';
@@ -42,14 +43,7 @@ function cleanCommand(text = '') {
   return text.trim().split(/\s+/)[0].toLowerCase().split('@')[0];
 }
 
-export default async function handler(req, res) {
-  if (req.method !== 'POST') return res.status(405).json({ ok: false, error: 'Method not allowed' });
-  if (!verifyWebhook(req)) return res.status(401).json({ ok: false, error: 'Invalid webhook secret' });
-
-  // Telegram expects a fast 200. The actual processing still happens during this invocation.
-  res.status(200).json({ ok: true });
-
-  const message = req.body?.message;
+async function processMessage(message) {
   if (!message?.from || !message?.chat) return;
 
   const user = message.from;
@@ -149,9 +143,20 @@ export default async function handler(req, res) {
   } catch (error) {
     console.error(error);
     try {
-      await sendMessage(chatId, `Не удалось обработать ответ. ${error.message}`);
+      await sendMessage(chatId, 'Не удалось обработать ответ. Ошибка записана в журнал Vercel. Попробуй ещё раз позже.');
     } catch (sendError) {
       console.error(sendError);
     }
   }
+}
+
+export default function handler(req, res) {
+  if (req.method !== 'POST') return res.status(405).json({ ok: false, error: 'Method not allowed' });
+  if (!verifyWebhook(req)) return res.status(401).json({ ok: false, error: 'Invalid webhook secret' });
+
+  const message = req.body?.message;
+  if (message) waitUntil(processMessage(message));
+
+  // Telegram получает ответ сразу; Vercel продолжает обработку через waitUntil.
+  return res.status(200).json({ ok: true });
 }
