@@ -1,6 +1,6 @@
 import { waitUntil } from '@vercel/functions';
 import { loadQuestionnaire, getCurrentQuestion, getProgress, formatQuestion } from '../lib/questions.js';
-import { readAnswerStore, saveResponse } from '../lib/github-store.js';
+import { readAnswerStore, appendAnswerFragment, finalizeAnswer, skipQuestion } from '../lib/github-store.js';
 import { getTelegramFile, sendMessage } from '../lib/telegram.js';
 import { transcribeAudio } from '../lib/gemini.js';
 
@@ -36,7 +36,10 @@ async function sendProgress(chatId, userId) {
   const questionnaire = loadQuestionnaire();
   const respondent = await loadRespondent(userId);
   const progress = getProgress(questionnaire, respondent);
-  await sendMessage(chatId, `Пройдено: ${progress.completed} из ${progress.total} (${progress.percent}%).`);
+  const current = getCurrentQuestion(questionnaire, respondent);
+  const fragments = current ? (respondent?.responses?.[current.id]?.fragments?.length ?? 0) : 0;
+  const extra = fragments ? ` Сейчас на ${current.id} накоплено частей ответа: ${fragments}.` : '';
+  await sendMessage(chatId, `Пройдено: ${progress.completed} из ${progress.total} (${progress.percent}%).${extra}`);
 }
 
 function cleanCommand(text = '') {
@@ -64,7 +67,7 @@ async function processMessage(message) {
     }
 
     if (command === '/start') {
-      await sendMessage(chatId, 'Это стратегический опросник IBA Wellness. Я задаю вопросы по одному. Можно отвечать голосом или текстом.');
+      await sendMessage(chatId, 'Это стратегический опросник IBA Wellness. Я задаю вопросы по одному. На один вопрос можно отправить несколько голосовых и текстовых сообщений. Когда ответ закончен — /done.');
       await sendCurrent(chatId, user.id);
       return;
     }
@@ -89,18 +92,22 @@ async function processMessage(message) {
     }
 
     if (command === '/skip') {
-      const updated = await saveResponse({
-        user,
-        question,
-        status: 'skipped',
-        answerType: 'skip',
-        transcript: '',
-        telegramMessageId: message.message_id,
-      });
+      const updated = await skipQuestion({ user, question, telegramMessageId: message.message_id });
       await sendMessage(chatId, `Пропущено: ${question.id}.`);
       const next = getCurrentQuestion(questionnaire, updated);
       if (next) await sendMessage(chatId, formatQuestion(questionnaire, next, updated));
       else await sendMessage(chatId, 'Все вопросы пройдены.');
+      return;
+    }
+
+    if (command === '/done') {
+      const updated = await finalizeAnswer({ user, question });
+      const combined = updated.responses?.[question.id]?.transcript || '';
+      const preview = combined.length > 1600 ? `${combined.slice(0, 1600)}…` : combined;
+      await sendMessage(chatId, `Ответ на ${question.id} завершён.\n\nИтоговый текст из всех частей:\n${preview}`);
+      const next = getCurrentQuestion(questionnaire, updated);
+      if (next) await sendMessage(chatId, formatQuestion(questionnaire, next, updated));
+      else await sendMessage(chatId, 'Все текущие вопросы пройдены. Если в проект добавятся новые вопросы, бот увидит их после следующего обновления.');
       return;
     }
 
@@ -113,7 +120,8 @@ async function processMessage(message) {
         await sendMessage(chatId, `Голосовое слишком длинное. Максимум сейчас ${Math.floor(maxSeconds / 60)} мин.`);
         return;
       }
-      await sendMessage(chatId, `Получил голосовой ответ на ${question.id}. Расшифровываю…`);
+      const currentParts = respondent?.responses?.[question.id]?.fragments?.length ?? 0;
+      await sendMessage(chatId, `Получил часть ${currentParts + 1} ответа на ${question.id}. Расшифровываю…`);
       const file = await getTelegramFile(message.voice.file_id);
       transcript = await transcribeAudio(file.buffer, file.contentType || message.voice.mime_type || 'audio/ogg');
       answerType = 'voice';
@@ -121,25 +129,21 @@ async function processMessage(message) {
       transcript = text;
       answerType = 'text';
     } else {
-      await sendMessage(chatId, 'Ответь на текущий вопрос голосовым сообщением или обычным текстом.');
+      await sendMessage(chatId, 'Ответь голосовым сообщением или текстом. Можно прислать несколько частей. Когда закончишь — /done.');
       return;
     }
 
-    const updated = await saveResponse({
+    const updated = await appendAnswerFragment({
       user,
       question,
-      status: 'answered',
       answerType,
       transcript,
       telegramMessageId: message.message_id,
     });
 
-    const preview = transcript.length > 1000 ? `${transcript.slice(0, 1000)}…` : transcript;
-    await sendMessage(chatId, `Сохранено: ${question.id}\n\nРасшифровка:\n${preview}`);
-
-    const next = getCurrentQuestion(questionnaire, updated);
-    if (next) await sendMessage(chatId, formatQuestion(questionnaire, next, updated));
-    else await sendMessage(chatId, 'Все текущие вопросы пройдены. Если в проект добавятся новые вопросы, бот увидит их после следующего обновления.');
+    const count = updated?.responses?.[question.id]?.fragments?.length ?? 1;
+    const preview = transcript.length > 900 ? `${transcript.slice(0, 900)}…` : transcript;
+    await sendMessage(chatId, `Часть ${count} сохранена для ${question.id}.\n\n${preview}\n\nМожешь добавить ещё голосовое или текст. Когда ответ закончен — /done.`);
   } catch (error) {
     console.error(error);
     try {
@@ -157,6 +161,5 @@ export default function handler(req, res) {
   const message = req.body?.message;
   if (message) waitUntil(processMessage(message));
 
-  // Telegram получает ответ сразу; Vercel продолжает обработку через waitUntil.
   return res.status(200).json({ ok: true });
 }
