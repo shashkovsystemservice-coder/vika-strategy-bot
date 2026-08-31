@@ -1,13 +1,18 @@
 import { waitUntil } from '@vercel/functions';
 import { loadQuestionnaire, getCurrentQuestion, getProgress, formatQuestion } from '../lib/questions.js';
-import { readAnswerStore, appendAnswerFragment, finalizeAnswer, skipQuestion } from '../lib/github-store.js';
+import { readAnswerStore, appendAnswerFragment, finalizeAnswer, skipQuestion, appendRecoveryMessage } from '../lib/github-store.js';
 import { getTelegramFile, sendMessage } from '../lib/telegram.js';
 import { transcribeAudio } from '../lib/gemini.js';
 
 function isAllowed(userId) {
-  const allowed = process.env.ALLOWED_TELEGRAM_USER_ID;
-  if (!allowed) return true;
-  return String(userId) === String(allowed);
+  const enforce = String(process.env.ENFORCE_TELEGRAM_ALLOWLIST || '').toLowerCase();
+  if (!['1', 'true', 'yes'].includes(enforce)) return true;
+  const allowed = String(process.env.ALLOWED_TELEGRAM_USER_ID || '')
+    .split(',')
+    .map((v) => v.trim())
+    .filter(Boolean);
+  if (!allowed.length) return true;
+  return allowed.includes(String(userId));
 }
 
 function verifyWebhook(req) {
@@ -46,6 +51,89 @@ function cleanCommand(text = '') {
   return text.trim().split(/\s+/)[0].toLowerCase().split('@')[0];
 }
 
+function isForwarded(message) {
+  return Boolean(
+    message?.forward_origin ||
+    message?.forward_date ||
+    message?.forward_from ||
+    message?.forward_sender_name ||
+    message?.forward_from_chat
+  );
+}
+
+function getForwardedAt(message) {
+  const unix = message?.forward_origin?.date || message?.forward_date;
+  return unix ? new Date(Number(unix) * 1000).toISOString() : null;
+}
+
+function getForwardOriginType(message) {
+  return message?.forward_origin?.type || (message?.forward_from ? 'user' : message?.forward_from_chat ? 'chat' : null);
+}
+
+function getAudioPayload(message) {
+  if (message?.voice) {
+    return {
+      fileId: message.voice.file_id,
+      duration: message.voice.duration || 0,
+      mimeType: message.voice.mime_type || 'audio/ogg',
+      answerType: 'voice',
+    };
+  }
+  if (message?.audio) {
+    return {
+      fileId: message.audio.file_id,
+      duration: message.audio.duration || 0,
+      mimeType: message.audio.mime_type || 'audio/mpeg',
+      answerType: 'audio',
+    };
+  }
+  if (message?.document?.mime_type?.startsWith('audio/')) {
+    return {
+      fileId: message.document.file_id,
+      duration: 0,
+      mimeType: message.document.mime_type,
+      answerType: 'audio_document',
+    };
+  }
+  return null;
+}
+
+async function processForwardedRecovery(message, user, chatId) {
+  const text = message.text?.trim() || message.caption?.trim() || '';
+  const audio = getAudioPayload(message);
+  let transcript = text;
+  let answerType = text ? 'text' : 'unknown';
+
+  if (audio) {
+    const maxSeconds = Number(process.env.MAX_VOICE_SECONDS || 600);
+    if (audio.duration && audio.duration > maxSeconds) {
+      await sendMessage(chatId, `Архивное голосовое слишком длинное. Максимум сейчас ${Math.floor(maxSeconds / 60)} мин.`);
+      return;
+    }
+    await sendMessage(chatId, 'Получил пересланное архивное сообщение. Расшифровываю без привязки к вопросу…');
+    const file = await getTelegramFile(audio.fileId);
+    transcript = await transcribeAudio(file.buffer, file.contentType || audio.mimeType);
+    answerType = audio.answerType;
+  }
+
+  if (!transcript) {
+    await sendMessage(chatId, 'Это пересланное сообщение не содержит текста или поддерживаемого аудио.');
+    return;
+  }
+
+  await appendRecoveryMessage({
+    user,
+    answerType,
+    transcript,
+    telegramMessageId: message.message_id,
+    forwardedAt: getForwardedAt(message),
+    forwardOriginType: getForwardOriginType(message),
+  });
+
+  const preview = transcript.length > 900 ? `${transcript.slice(0, 900)}…` : transcript;
+  await sendMessage(chatId, `Архивное сообщение сохранено отдельно, без привязки к вопросу.\n\n${preview}\n\nМожно пересылать следующие сообщения подряд.`);
+}
+
 async function processMessage(message) {
   if (!message?.from || !message?.chat) return;
 
@@ -67,7 +155,7 @@ async function processMessage(message) {
     }
 
     if (command === '/start') {
-      await sendMessage(chatId, 'Это стратегический опросник IBA Wellness. Я задаю вопросы по одному. На один вопрос можно отправить несколько голосовых и текстовых сообщений. Когда ответ закончен — /done.');
+      await sendMessage(chatId, 'Это стратегический опросник IBA Wellness. Я задаю вопросы по одному. На один вопрос можно отправить несколько голосовых и текстовых сообщений. Когда ответ закончен — /done. Старые сообщения можно просто переслать сюда: я сохраню и расшифрую их отдельно, без привязки к вопросам.');
       await sendCurrent(chatId, user.id);
       return;
     }
@@ -79,6 +167,11 @@ async function processMessage(message) {
 
     if (command === '/repeat' || command === '/next') {
       await sendCurrent(chatId, user.id);
+      return;
+    }
+
+    if (isForwarded(message)) {
+      await processForwardedRecovery(message, user, chatId);
       return;
     }
 
